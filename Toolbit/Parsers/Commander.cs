@@ -37,8 +37,14 @@ namespace Toolbit.Parsers
     }
 
     /// <summary>
+    /// Commander is a command line parser that uses CommandAttribute and method signature to
+    /// match string input to it's corresponding handler method.
+    /// 
+    /// When matches are tryed for arguments are parsed into each method signature untill a one is
+    /// found.
+    /// 
     /// Given a type, this wrapper will translate all public static methods which are marked by 
-    /// a CommandAttribute into a list of commands that can be invoked using a string value.
+    /// a CommandAttribute into a list of commands.
     /// </summary>
     public class Commander
     {
@@ -51,6 +57,11 @@ namespace Toolbit.Parsers
 
         public static Commander Create<T>() => Commander.Create(typeof(T));
 
+        /// <summary>
+        /// Creates an instance of Commander for a given Type.
+        /// </summary>
+        /// <param name="type"></param>
+        /// <returns></returns>
         public static Commander Create(Type type)
         {
             // we store a dictionary of all found commands
@@ -60,9 +71,11 @@ namespace Toolbit.Parsers
             var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static);
             foreach (var method in methods)
             {
+                var defaultAlias = method.Name.ToLower();
+
                 // Skip all methods that do not declare as CommandAttribute
                 var attr = (CommandAttribute) Attribute.GetCustomAttribute(method, typeof(CommandAttribute));
-                if (attr == null) continue;
+                if (attr == null && !IsOverloadedMethodExists(methods, method.Name)) continue;
 
                 // Collect method parameters information
                 var parameters = new List<Parameter>();
@@ -78,7 +91,6 @@ namespace Toolbit.Parsers
                     }); ;
                 }
 
-                var defaultAlias = method.Name.ToLower();
                 var callback = new Callback(
                     method: method,
                     parameters: parameters.AsReadOnly()
@@ -98,11 +110,11 @@ namespace Toolbit.Parsers
 
                 // Add this command to list of existing overloaded methods
                 command.Methods.Add(callback);
-                command.Alias = attr.Alias ?? command.Alias;
-                command.Description = attr.Description ?? command.Description;
+                command.Alias = attr?.Alias ?? command.Alias;
+                command.Description = attr?.Description ?? command.Description;
 
                 // When Alias is specified attempt to create a separate key/value pair in the existing invokation map
-                if (attr.Alias != null && commands.TryGetValue(attr.Alias, out Command groupedAlias))
+                if (attr?.Alias != null && commands.TryGetValue(command.Alias, out Command groupedAlias))
                 {
                     if (groupedAlias == command)
                     {
@@ -114,9 +126,9 @@ namespace Toolbit.Parsers
                         throw new CommanderDefinitionException($"Can not re-define existing alias");
                     }
                 }
-                else if(attr.Alias != null)
+                else if(attr?.Alias != null)
                 {
-                    commands.Add(attr.Alias, command);
+                    commands.Add(command.Alias, command);
                 }
 
                 // Register default aliases for the command
@@ -130,6 +142,7 @@ namespace Toolbit.Parsers
         }
 
         /// <summary>
+        /// Invokes matching method to a given string.
         /// Returns True when a matching method is found and invoked and False otherwise.
         /// </summary>
         /// <param name="input"></param>
@@ -159,6 +172,10 @@ namespace Toolbit.Parsers
 
         static ParamArrayAttribute Params(ParameterInfo info) => 
             (ParamArrayAttribute)info.GetCustomAttributes(typeof(ParamArrayAttribute), false).FirstOrDefault();
+
+        static bool IsOverloadedMethodExists(MethodInfo[] methods, string name) =>
+            methods.FirstOrDefault(method => method.Name == name) != null;
+
         #endregion
     }
 
@@ -239,14 +256,32 @@ namespace Toolbit.Parsers
         #region Private helper methods
         private bool TryParseSignature(string[] input, out object[] result)
         {
+            var isSuccess = true;
             result = input
+                .TakeWhile(str => isSuccess)
                 .Select((string str, int i) =>
                 {
                     var param = Parameters[i];
-                    return param.IsNullable ? null : Convert.ChangeType(str, param.Type);
+                    var parsed = TryChangeType(str, param.Type, out object res);
+                    isSuccess = parsed || param.IsNullable;
+                    return res;
                 })
                 .ToArray();
-            return true;
+            return isSuccess;
+        }
+
+        private bool TryChangeType(string value, Type conversionType, out object res)
+        {
+            try
+            {
+                res = Convert.ChangeType(value, conversionType);
+                return true;
+            }
+            catch (Exception)
+            {
+                res = null;
+                return false;
+            }
         }
 
         // equal count OR command is using params operator
