@@ -12,7 +12,7 @@ namespace Toolbit.Specs.Parsers.Commander
     {
         Type Type;
         Toolbit.Parsers.Commander TargetCommander;
-        List<Command> TargetCommandList;
+        Command TargetCommand;
 
         bool LastResult;
         string LastOutput;
@@ -40,15 +40,19 @@ namespace Toolbit.Specs.Parsers.Commander
         [When(@"I inspect command '(.*)'")]
         public void WhenInspectingCommandRecord(string commandName)
         {
-            var success = TargetCommander.Commands.TryGetValue(commandName, out List<Command> command);
+            var success = TargetCommander.Commands.TryGetValue(commandName, out Command command);
             Assert.IsTrue(success, $"Command not found. Did you mis-spell '${commandName}'");
-            TargetCommandList = command;
+            TargetCommand = command;
         }
 
-        [Then(@"Command has property '(.*)' equal to '(.*)'")]
+        [Then(@"It's property '(.*)' should equal to '(.*)'")]
         public void ThenCommandHasProperty(string paramName, string paramValue)
         {
-
+            Assert.AreEqual(
+                TargetCommand.GetType().GetProperty(paramName).GetValue(TargetCommand), 
+                paramValue,
+                $"Property '{paramName}' does not match value '{paramValue}'"
+                );
         }
 
         [Given(@"Input '(.*)'")]

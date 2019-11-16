@@ -7,7 +7,7 @@ namespace Toolbit.Specs.Parsers.Commander
     {
         public static Action<string> OnMethodInvoked;
 
-        [Command(Alias = "tz")]
+        [Command(Alias = "tz", Description = "Test command")]
         public static void TestZero()
         {
             OnMethodInvoked?.Invoke(string.Empty);

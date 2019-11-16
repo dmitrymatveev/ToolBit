@@ -6,127 +6,45 @@ using System.Collections.ObjectModel;
 
 namespace Toolbit.Parsers
 {
-    class Parameter
+    /// <summary>
+    /// Marks target method as a command handler.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Method)]
+    public class CommandAttribute : Attribute
     {
-        public bool IsNullable;
-        public bool HasDefaultValue;
-        public object DefaultValue;
-        public ParamArrayAttribute Params;
-        public Type Type;
+        public string Alias;
+        public string Description;
     }
 
+    /// <summary>
+    /// Object representation of a Command method.
+    /// </summary>
     public class Command
     {
-        internal static readonly int PARAMS = 1000;
+        public string Name { get; internal set; }
+        public string Alias { get; internal set; }
+        public string Description { get; internal set; }
 
-        public readonly string Name;
-        public readonly string Alias;
-        public readonly string Description;
+        internal object[] CurrentParsedArgs;
+        internal List<Callback> Methods = new List<Callback>();
 
-        private  readonly MethodInfo Method;
-        private readonly IReadOnlyList<Parameter> Parameters;
-
-        private Lazy<int> RequiredCount;
-        private Lazy<int> OptionalCount;
-        private Lazy<int> TotalCount;
-
-        private object[] CurrentParsedArgs;
-
-        internal Command(string alias, string description, MethodInfo method, IReadOnlyList<Parameter> parameters)
+        internal Command(string name, string alias, string description)
         {
-            Method = method;
-            Name = method.Name;
+            Name = name;
             Alias = alias;
             Description = description;
-            Parameters = parameters;
-
-            RequiredCount = new Lazy<int>(GetRequiredCount);
-            OptionalCount = new Lazy<int>(GetOptionalCount);
-            TotalCount = new Lazy<int>(GetTotalCount);
         }
-
-        /// <summary>
-        /// Attempts to match given string to this Command method signature and
-        /// keeps parsed arguments untill next invocation.
-        /// </summary>
-        /// <param name="input">Array of potential method arguments</param>
-        /// <returns>True if successful match is found and False otherwise.</returns>
-        public bool TryParseArguments(string[] input)
-        {
-            var total = TotalCount.Value;
-            var len = input.Length;
-            
-            object[] result;
-            if ((IsEqualOrParams(len, total) || IsRequiredOrOptional(len)) && TryParseSignature(input, out result))
-            {
-                CurrentParsedArgs = result;
-                return true;
-            }
-            else if (IsLessThenOptional(len, total) && TryParseSignature(input, out result))
-            {
-                return true;
-            }
-
-            CurrentParsedArgs = null;
-            // otherwise reject
-            return false;
-        }
-
-        public void Invoke()
-        {
-            Method.Invoke(null, CurrentParsedArgs);
-        }
-
-        private bool TryParseSignature(string[] input, out object[] result)
-        {
-            result = input
-                .Select((string str, int i) =>
-                {
-                    var param = Parameters[i];
-                    return param.IsNullable ? null : Convert.ChangeType(str, param.Type);
-                })
-                .ToArray();
-            return true;
-        }
-
-        #region Private helper methods
-
-        // equal count OR command is using params operator
-        private bool IsEqualOrParams(int len, int total) => (len == total || total >= Command.PARAMS);
-        // matches required OR optional count
-        private bool IsRequiredOrOptional(int len) => (RequiredCount.Value == len || OptionalCount.Value == len);
-        // more then required but less then total
-        private bool IsLessThenOptional(int len, int total) => (RequiredCount.Value < len && total > len);
-
-        private int GetRequiredCount()
-        {
-            var count = 0;
-            foreach (var arg in Parameters)
-                count += !(arg.HasDefaultValue || arg.Params != null) ? 1 : 0;
-            return count;
-        }
-
-        private int GetOptionalCount()
-        {
-            var count = 0;
-            foreach (var arg in Parameters)
-                if (arg.Params != null) return Command.PARAMS;
-                else count += arg.HasDefaultValue ? 1 : 0;
-            return count;
-        }
-
-        private int GetTotalCount()
-        {
-            return RequiredCount.Value + OptionalCount.Value;
-        }
-        #endregion
     }
 
+    /// <summary>
+    /// Given a type, this wrapper will translate all public static methods which are marked by 
+    /// a CommandAttribute into a list of commands that can be invoked using a string value.
+    /// </summary>
     public class Commander
     {
-        public readonly ReadOnlyDictionary<string, List<Command>> Commands;
+        public ReadOnlyDictionary<string, Command> Commands { get; private set; }
 
-        private Commander(ReadOnlyDictionary<string, List<Command>> commands)
+        private Commander(ReadOnlyDictionary<string, Command> commands)
         {
             Commands = commands;
         }
@@ -136,14 +54,14 @@ namespace Toolbit.Parsers
         public static Commander Create(Type type)
         {
             // we store a dictionary of all found commands
-            var commands = new Dictionary<string, List<Command>>();
+            var commands = new Dictionary<string, Command>();
 
             // search in all public static methods
             var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static);
             foreach (var method in methods)
             {
                 // Skip all methods that do not declare as CommandAttribute
-                CommandAttribute attr = (CommandAttribute) Attribute.GetCustomAttribute(method, typeof(CommandAttribute));
+                var attr = (CommandAttribute) Attribute.GetCustomAttribute(method, typeof(CommandAttribute));
                 if (attr == null) continue;
 
                 // Collect method parameters information
@@ -160,49 +78,55 @@ namespace Toolbit.Parsers
                     }); ;
                 }
 
-                // Create instance of command
-                var command = new Command(
+                var defaultAlias = method.Name.ToLower();
+                var callback = new Callback(
                     method: method,
-                    alias: attr.Alias ?? null,
-                    description: attr.Description ?? null,
                     parameters: parameters.AsReadOnly()
                     );
 
                 // Find existing list for this Command overloaded methods
-                if (!commands.TryGetValue(command.Name, out List<Command> grouped))
+                if (!commands.TryGetValue(defaultAlias, out Command command))
                 {
-                    grouped = new List<Command>();
-                    commands.Add(command.Name, grouped);
+                    // Create instance of command
+                    command = new Command(
+                        name: defaultAlias,
+                        alias: attr.Alias ?? null,
+                        description: attr.Description ?? null
+                        );
+                    commands.Add(defaultAlias, command);
                 }
+
                 // Add this command to list of existing overloaded methods
-                grouped.Add(command);
+                command.Methods.Add(callback);
+                command.Alias = attr.Alias ?? command.Alias;
+                command.Description = attr.Description ?? command.Description;
 
                 // When Alias is specified attempt to create a separate key/value pair in the existing invokation map
-                if (command.Alias != null && commands.TryGetValue(command.Alias, out List<Command> groupedAlias))
+                if (attr.Alias != null && commands.TryGetValue(attr.Alias, out Command groupedAlias))
                 {
-                    if (groupedAlias == grouped)
+                    if (groupedAlias == command)
                     {
-                        throw new CommanderDefinitionException($"Can not re-define existing alias '{command.Alias}'. Did you try to define Command on overloaded method?");
+                        throw new CommanderDefinitionException($"Can not re-define existing alias " +
+                            $"'{command.Alias}'. Did you try to define Command on overloaded method?");
                     }
                     else
                     {
                         throw new CommanderDefinitionException($"Can not re-define existing alias");
                     }
                 }
-                else if(command.Alias != null)
+                else if(attr.Alias != null)
                 {
-                    commands.Add(command.Alias, grouped);
+                    commands.Add(attr.Alias, command);
                 }
 
                 // Register default aliases for the command
-                var defaultAlias = method.Name.ToLower();
-                if (!commands.ContainsKey(defaultAlias))
+                if (!commands.ContainsKey(method.Name))
                 {
-                    commands.Add(defaultAlias, grouped);
+                    commands.Add(method.Name, command);
                 }
             }
 
-            return new Commander(new ReadOnlyDictionary<string, List<Command>>(commands));
+            return new Commander(new ReadOnlyDictionary<string, Command>(commands));
         }
 
         /// <summary>
@@ -218,12 +142,14 @@ namespace Toolbit.Parsers
 
             if (!Commands.ContainsKey(name)) return false;
 
-            var command = Commands.GetValueOrDefault(name)
-                .FirstOrDefault(cmd => cmd.TryParseArguments(args));
-
+            var command = Commands.GetValueOrDefault(name);
             if (command == null) return false;
 
-            command.Invoke();
+            command
+                .Methods
+                .FirstOrDefault(cb => cb.TryParseArguments(args, ref command.CurrentParsedArgs))
+                ?.Invoke(command.CurrentParsedArgs);
+
             return true;
         }
 
@@ -242,20 +168,116 @@ namespace Toolbit.Parsers
         { }
     }
 
-    [AttributeUsage(AttributeTargets.Method)]
-    public class CommandAttribute : Attribute
+    #region Internal wrapper classes around reflection info
+    class Parameter
     {
-        public string Alias;
-        public string Description;
-
-        public CommandAttribute()
-        { }
+        public bool IsNullable;
+        public bool HasDefaultValue;
+        public object DefaultValue;
+        public ParamArrayAttribute Params;
+        public Type Type;
     }
 
-    [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
-    public class ArgumentAttribute : Attribute
+    class Callback
     {
-        public ArgumentAttribute(string name)
-        { }
+        internal static readonly int PARAMS = 1000;
+
+        private readonly MethodInfo Method;
+        private readonly IReadOnlyList<Parameter> Parameters;
+
+        private readonly Lazy<int> RequiredCount;
+        private readonly Lazy<int> OptionalCount;
+        private readonly Lazy<int> TotalCount;
+
+        internal Callback(MethodInfo method, IReadOnlyList<Parameter> parameters)
+        {
+            Method = method;
+            Parameters = parameters;
+
+            RequiredCount = new Lazy<int>(GetRequiredCount);
+            OptionalCount = new Lazy<int>(GetOptionalCount);
+            TotalCount = new Lazy<int>(GetTotalCount);
+        }
+
+        /// <summary>
+        /// Attempts to match given string to this Command method signature and
+        /// keeps parsed arguments untill next invocation.
+        /// </summary>
+        /// <param name="input">Array of potential method arguments</param>
+        /// <param name="currentParsedArgs">Parsed parameters from input string</param>
+        /// <returns>True if successful match is found and False otherwise.</returns>
+        internal bool TryParseArguments(string[] input, ref object[] currentParsedArgs)
+        {
+            var total = TotalCount.Value;
+            var len = input.Length;
+
+            object[] result;
+            if ((IsEqualOrParams(len, total) || IsRequiredOrOptional(len)) && TryParseSignature(input, out result))
+            {
+                currentParsedArgs = result;
+                return true;
+            }
+            else if (IsLessThenOptional(len, total) && TryParseSignature(input, out result))
+            {
+                return true;
+            }
+
+            currentParsedArgs = null;
+            // otherwise reject
+            return false;
+        }
+
+        /// <summary>
+        /// Invokes current callback
+        /// </summary>
+        /// <param name="currentParsedArgs">Array of parsed arguments</param>
+        internal void Invoke(object[] currentParsedArgs)
+        {
+            Method.Invoke(null, currentParsedArgs);
+        }
+
+        #region Private helper methods
+        private bool TryParseSignature(string[] input, out object[] result)
+        {
+            result = input
+                .Select((string str, int i) =>
+                {
+                    var param = Parameters[i];
+                    return param.IsNullable ? null : Convert.ChangeType(str, param.Type);
+                })
+                .ToArray();
+            return true;
+        }
+
+        // equal count OR command is using params operator
+        private bool IsEqualOrParams(int len, int total) => (len == total || total >= PARAMS);
+        // matches required OR optional count
+        private bool IsRequiredOrOptional(int len) => (RequiredCount.Value == len || OptionalCount.Value == len);
+        // more then required but less then total
+        private bool IsLessThenOptional(int len, int total) => (RequiredCount.Value < len && total > len);
+
+        private int GetRequiredCount()
+        {
+            var count = 0;
+            foreach (var arg in Parameters)
+                count += !(arg.HasDefaultValue || arg.Params != null) ? 1 : 0;
+            return count;
+        }
+
+        private int GetOptionalCount()
+        {
+            var count = 0;
+            foreach (var arg in Parameters)
+                if (arg.Params != null) return PARAMS;
+                else count += arg.HasDefaultValue ? 1 : 0;
+            return count;
+        }
+
+        private int GetTotalCount()
+        {
+            return RequiredCount.Value + OptionalCount.Value;
+        }
+        #endregion
     }
+    #endregion
 }
